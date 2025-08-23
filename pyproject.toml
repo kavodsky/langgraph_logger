@@ -1,0 +1,89 @@
+# Package structure for langgraph-logger
+
+# pyproject.toml
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "langgraph-logger"
+version = "0.1.0"
+description = "Advanced logging and state management for LangGraph executions with database persistence"
+readme = "README.md"
+license = "MIT"
+authors = [
+    {name = "Andras Gyacsok", email = "atti.dyachok@gmail.com"},
+]
+keywords = ["langgraph", "logging", "langchain", "graph", "execution", "tracking"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+requires-python = ">=3.10, <4.0"
+dependencies = [
+    "alembic>=1.16.4",
+    "langchain-core>=0.3.74",
+    "langgraph>=0.6.6",
+    "pydantic>=2.10.6",
+    "pydantic-settings>=2.8.1",
+    "rich>=14.1.0",
+    "sqlalchemy>=2.0.43",
+    "typer>=0.16.1",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg2-binary>=2.9.0"]
+mysql = ["pymysql>=1.0.0"]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.0.0",
+    "pre-commit>=3.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/langgraph-logger"
+Repository = "https://github.com/yourusername/langgraph-logger"
+Documentation = "https://github.com/yourusername/langgraph-logger#readme"
+
+[project.scripts]
+langgraph-logger = "langgraph_logger.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/langgraph_logger"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/README.md",
+    "/LICENSE",
+]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
