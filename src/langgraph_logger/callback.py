@@ -93,11 +93,21 @@ class GraphExecutionCallback(BaseCallbackHandler):
         self.total_nodes_completed = 0
         self.total_nodes_failed = 0
 
+        # Error tracking for better debugging
+        self.errors: List[Dict[str, Any]] = []
+
         # Initialize database tables if needed
         try:
             self.repository.create_tables()
         except Exception as e:
             logger.warning(f"Could not create database tables: {e}")
+            # Store error for debugging
+            self.errors.append({
+                "type": "database_init_error",
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+                "timestamp": time.time()
+            })
 
     def _ensure_execution_started(self) -> None:
         """Ensure graph execution is recorded in database."""
@@ -119,139 +129,204 @@ class GraphExecutionCallback(BaseCallbackHandler):
 
                     except Exception as e:
                         logger.error(f"Failed to create graph execution record: {e}")
+                        # Store detailed error info
+                        self.errors.append({
+                            "type": "execution_creation_error",
+                            "error": str(e),
+                            "traceback": traceback.format_exc(),
+                            "timestamp": time.time()
+                        })
                         # Continue without database logging
                         self.execution_id = f"local_{int(time.time())}"
                         self.graph_start_time = time.perf_counter()
 
     def on_chain_start(self, serialized: Dict[str, Any], inputs: Dict[str, Any], **kwargs) -> None:
         """Called when a node/chain starts execution."""
-        self._ensure_execution_started()
+        try:
+            self._ensure_execution_started()
 
-        run_id = kwargs.get("run_id", f"unknown_run_{time.time()}")
-        node_name = self._extract_node_name(serialized, kwargs)
+            run_id = kwargs.get("run_id", f"unknown_run_{time.time()}")
+            node_name = self._extract_node_name(serialized, kwargs)
 
-        with self._lock:
-            # Track this node execution
-            self.active_runs.add(run_id)
-            self.node_start_times[run_id] = time.perf_counter()
-            self.node_names[run_id] = node_name
-            self.total_nodes_started += 1
+            with self._lock:
+                # Track this node execution
+                self.active_runs.add(run_id)
+                self.node_start_times[run_id] = time.perf_counter()
+                self.node_names[run_id] = node_name
+                self.total_nodes_started += 1
 
-            # Update concurrent execution tracking
-            current_concurrent = len(self.active_runs)
-            if current_concurrent > self.max_concurrent_nodes:
-                self.max_concurrent_nodes = current_concurrent
+                # Update concurrent execution tracking
+                current_concurrent = len(self.active_runs)
+                if current_concurrent > self.max_concurrent_nodes:
+                    self.max_concurrent_nodes = current_concurrent
 
-        # Log to database
-        if self.execution_id and not self.execution_id.startswith("local_"):
-            try:
-                node_data = NodeExecutionCreate(
-                    execution_id=self.execution_id,
-                    node_name=node_name,
-                    run_id=run_id,
-                    input_data=inputs if len(str(inputs)) < 10000 else {"_truncated": True},
-                    extra_metadata=kwargs.get("extra_metadata")
-                )
-                self.repository.create_node_execution(node_data)
-            except Exception as e:
-                logger.error(f"Failed to create node execution record: {e}")
+            # Log to database
+            if self.execution_id and not self.execution_id.startswith("local_"):
+                try:
+                    node_data = NodeExecutionCreate(
+                        execution_id=self.execution_id,
+                        node_name=node_name,
+                        run_id=run_id,
+                        input_data=inputs if len(str(inputs)) < 10000 else {"_truncated": True},
+                        extra_metadata=kwargs.get("extra_metadata")
+                    )
+                    self.repository.create_node_execution(node_data)
+                except Exception as e:
+                    logger.error(f"Failed to create node execution record: {e}")
+                    self.errors.append({
+                        "type": "node_creation_error",
+                        "node_name": node_name,
+                        "run_id": run_id,
+                        "error": str(e),
+                        "traceback": traceback.format_exc(),
+                        "timestamp": time.time()
+                    })
 
-        # Console logging
-        if self.settings.enable_console_logging:
-            self._log_node_start(node_name, inputs, run_id)
+            # Console logging
+            if self.settings.enable_console_logging:
+                self._log_node_start(node_name, inputs, run_id)
 
-        # Update current state with inputs (simple merge)
-        if inputs and self.settings.auto_save_state:
-            self.current_state.update(inputs)
+            # Update current state with inputs (simple merge)
+            if inputs and self.settings.auto_save_state:
+                self.current_state.update(inputs)
+
+        except Exception as e:
+            logger.error(f"Error in on_chain_start: {e}")
+            self.errors.append({
+                "type": "callback_error",
+                "method": "on_chain_start",
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+                "timestamp": time.time()
+            })
 
     def on_chain_end(self, outputs: Dict[str, Any], **kwargs) -> None:
         """Called when a node/chain ends successfully."""
-        run_id = kwargs.get("run_id", "unknown_run")
+        try:
+            run_id = kwargs.get("run_id", "unknown_run")
 
-        with self._lock:
-            if run_id not in self.node_start_times or run_id not in self.node_names:
-                logger.warning(f"Node end called for unknown run_id: {run_id}")
-                return
+            with self._lock:
+                if run_id not in self.node_start_times or run_id not in self.node_names:
+                    logger.warning(f"Node end called for unknown run_id: {run_id}")
+                    return
 
-            # Calculate execution time
-            end_time = time.perf_counter()
-            execution_time = end_time - self.node_start_times[run_id]
-            node_name = self.node_names[run_id]
+                # Calculate execution time
+                end_time = time.perf_counter()
+                execution_time = end_time - self.node_start_times[run_id]
+                node_name = self.node_names[run_id]
 
-            # Update tracking
-            self.active_runs.discard(run_id)
-            self.completed_runs.add(run_id)
-            self.total_nodes_completed += 1
+                # Update tracking
+                self.active_runs.discard(run_id)
+                self.completed_runs.add(run_id)
+                self.total_nodes_completed += 1
 
-            # Clean up
-            del self.node_start_times[run_id]
-            del self.node_names[run_id]
+                # Clean up
+                del self.node_start_times[run_id]
+                del self.node_names[run_id]
 
-        # Update database
-        if self.execution_id and not self.execution_id.startswith("local_"):
-            try:
-                update_data = NodeExecutionUpdate(
-                    status=NodeStatus.COMPLETED,
-                    output_data=outputs if len(str(outputs)) < 10000 else {"_truncated": True}
-                )
-                self.repository.update_node_execution(run_id, update_data)
-                self.repository.update_execution_stats(self.execution_id)
-            except Exception as e:
-                logger.error(f"Failed to update node execution record: {e}")
+            # Update database
+            if self.execution_id and not self.execution_id.startswith("local_"):
+                try:
+                    update_data = NodeExecutionUpdate(
+                        status=NodeStatus.COMPLETED,
+                        output_data=outputs if len(str(outputs)) < 10000 else {"_truncated": True}
+                    )
+                    self.repository.update_node_execution(run_id, update_data)
+                    self.repository.update_execution_stats(self.execution_id)
+                except Exception as e:
+                    logger.error(f"Failed to update node execution record: {e}")
+                    self.errors.append({
+                        "type": "node_update_error",
+                        "node_name": node_name,
+                        "run_id": run_id,
+                        "error": str(e),
+                        "traceback": traceback.format_exc(),
+                        "timestamp": time.time()
+                    })
 
-        # Console logging
-        if self.settings.enable_console_logging:
-            self._log_node_end(node_name, outputs, execution_time, run_id)
+            # Console logging
+            if self.settings.enable_console_logging:
+                self._log_node_end(node_name, outputs, execution_time, run_id)
 
-        # Update current state with outputs
-        if outputs and self.settings.auto_save_state:
-            self.current_state.update(outputs)
+            # Update current state with outputs
+            if outputs and self.settings.auto_save_state:
+                self.current_state.update(outputs)
 
-        # Create checkpoint if needed
-        self._maybe_create_checkpoint()
+            # Create checkpoint if needed
+            self._maybe_create_checkpoint()
+
+        except Exception as e:
+            logger.error(f"Error in on_chain_end: {e}")
+            self.errors.append({
+                "type": "callback_error",
+                "method": "on_chain_end",
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+                "timestamp": time.time()
+            })
 
     def on_chain_error(self, error: Exception, **kwargs) -> None:
         """Called when a node/chain encounters an error."""
-        run_id = kwargs.get("run_id", "unknown_run")
+        try:
+            run_id = kwargs.get("run_id", "unknown_run")
 
-        with self._lock:
-            if run_id not in self.node_start_times or run_id not in self.node_names:
-                logger.warning(f"Node error called for unknown run_id: {run_id}")
-                return
+            with self._lock:
+                if run_id not in self.node_start_times or run_id not in self.node_names:
+                    logger.warning(f"Node error called for unknown run_id: {run_id}")
+                    return
 
-            # Calculate time until error
-            error_time = time.perf_counter()
-            execution_time = error_time - self.node_start_times[run_id]
-            node_name = self.node_names[run_id]
+                # Calculate time until error
+                error_time = time.perf_counter()
+                execution_time = error_time - self.node_start_times[run_id]
+                node_name = self.node_names[run_id]
 
-            # Update tracking
-            self.active_runs.discard(run_id)
-            self.failed_runs.add(run_id)
-            self.total_nodes_failed += 1
+                # Update tracking
+                self.active_runs.discard(run_id)
+                self.failed_runs.add(run_id)
+                self.total_nodes_failed += 1
 
-            # Clean up
-            del self.node_start_times[run_id]
-            del self.node_names[run_id]
+                # Clean up
+                del self.node_start_times[run_id]
+                del self.node_names[run_id]
 
-        # Update database
-        if self.execution_id and not self.execution_id.startswith("local_"):
-            try:
-                update_data = NodeExecutionUpdate(
-                    status=NodeStatus.FAILED,
-                    error_message=str(error),
-                    error_type=type(error).__name__
-                )
-                self.repository.update_node_execution(run_id, update_data)
-                self.repository.update_execution_stats(self.execution_id)
-            except Exception as e:
-                logger.error(f"Failed to update node execution record: {e}")
+            # Update database
+            if self.execution_id and not self.execution_id.startswith("local_"):
+                try:
+                    update_data = NodeExecutionUpdate(
+                        status=NodeStatus.FAILED,
+                        error_message=str(error),
+                        error_type=type(error).__name__
+                    )
+                    self.repository.update_node_execution(run_id, update_data)
+                    self.repository.update_execution_stats(self.execution_id)
+                except Exception as e:
+                    logger.error(f"Failed to update node execution record: {e}")
+                    self.errors.append({
+                        "type": "node_error_update_error",
+                        "node_name": node_name,
+                        "run_id": run_id,
+                        "original_error": str(error),
+                        "update_error": str(e),
+                        "traceback": traceback.format_exc(),
+                        "timestamp": time.time()
+                    })
 
-        # Console logging
-        if self.settings.enable_console_logging:
-            self._log_node_error(node_name, error, execution_time, run_id)
+            # Console logging
+            if self.settings.enable_console_logging:
+                self._log_node_error(node_name, error, execution_time, run_id)
 
-        # Create error checkpoint
-        self._create_error_checkpoint(node_name, error)
+            # Create error checkpoint
+            self._create_error_checkpoint(node_name, error)
+
+        except Exception as e:
+            logger.error(f"Error in on_chain_error: {e}")
+            self.errors.append({
+                "type": "callback_error",
+                "method": "on_chain_error",
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+                "timestamp": time.time()
+            })
 
     def finalize_execution(self, final_state: Optional[Dict[str, Any]] = None,
                            error: Optional[Exception] = None) -> None:
@@ -261,48 +336,65 @@ class GraphExecutionCallback(BaseCallbackHandler):
             final_state: Final state of the graph execution
             error: Error that caused execution failure (if any)
         """
-        if self.execution_id is None:
-            return
+        try:
+            if self.execution_id is None:
+                return
 
-        # Determine final status
-        if error:
-            status = ExecutionStatus.FAILED
-            error_message = str(error)
-            error_traceback = traceback.format_exc()
-        elif self.total_nodes_failed > 0:
-            status = ExecutionStatus.FAILED
-            error_message = f"{self.total_nodes_failed} nodes failed"
-            error_traceback = None
-        else:
-            status = ExecutionStatus.COMPLETED
-            error_message = None
-            error_traceback = None
+            # Determine final status
+            if error:
+                status = ExecutionStatus.FAILED
+                error_message = str(error)
+                error_traceback = traceback.format_exc()
+            elif self.total_nodes_failed > 0:
+                status = ExecutionStatus.FAILED
+                error_message = f"{self.total_nodes_failed} nodes failed"
+                error_traceback = None
+            else:
+                status = ExecutionStatus.COMPLETED
+                error_message = None
+                error_traceback = None
 
-        # Update final state
-        if final_state:
-            self.current_state.update(final_state)
+            # Update final state
+            if final_state:
+                self.current_state.update(final_state)
 
-        # Update database
-        if not self.execution_id.startswith("local_"):
-            try:
-                update_data = GraphExecutionUpdate(
-                    status=status,
-                    final_state=self.current_state,
-                    error_message=error_message,
-                    error_traceback=error_traceback
-                )
-                self.repository.update_graph_execution(self.execution_id, update_data)
+            # Update database
+            if not self.execution_id.startswith("local_"):
+                try:
+                    update_data = GraphExecutionUpdate(
+                        status=status,
+                        final_state=self.current_state,
+                        error_message=error_message,
+                        error_traceback=error_traceback
+                    )
+                    self.repository.update_graph_execution(self.execution_id, update_data)
 
-                # Create final state checkpoint
-                if self.settings.auto_save_state:
-                    self._create_checkpoint("final_state", self.current_state)
+                    # Create final state checkpoint
+                    if self.settings.auto_save_state:
+                        self._create_checkpoint("final_state", self.current_state)
 
-            except Exception as e:
-                logger.error(f"Failed to finalize execution record: {e}")
+                except Exception as e:
+                    logger.error(f"Failed to finalize execution record: {e}")
+                    self.errors.append({
+                        "type": "finalization_error",
+                        "error": str(e),
+                        "traceback": traceback.format_exc(),
+                        "timestamp": time.time()
+                    })
 
-        # Console logging
-        if self.settings.enable_console_logging:
-            self._log_graph_end(status, error)
+            # Console logging
+            if self.settings.enable_console_logging:
+                self._log_graph_end(status, error)
+
+        except Exception as e:
+            logger.error(f"Error in finalize_execution: {e}")
+            self.errors.append({
+                "type": "callback_error",
+                "method": "finalize_execution",
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+                "timestamp": time.time()
+            })
 
     def get_execution_summary(self) -> Dict[str, Any]:
         """Get a summary of the current execution.
@@ -312,7 +404,7 @@ class GraphExecutionCallback(BaseCallbackHandler):
         """
         total_time = time.perf_counter() - self.graph_start_time if self.graph_start_time else 0
 
-        return {
+        summary = {
             "execution_id": self.execution_id,
             "graph_name": self.graph_name,
             "total_time": total_time,
@@ -322,8 +414,19 @@ class GraphExecutionCallback(BaseCallbackHandler):
             "success_rate": (self.total_nodes_completed / max(1, self.total_nodes_started)) * 100,
             "max_concurrent_nodes": self.max_concurrent_nodes,
             "active_runs": len(self.active_runs),
-            "checkpoint_count": self.checkpoint_counter
+            "checkpoint_count": self.checkpoint_counter,
+            "error_count": len(self.errors)
         }
+
+        return summary
+
+    def get_error_details(self) -> List[Dict[str, Any]]:
+        """Get detailed error information.
+
+        Returns:
+            List of error details
+        """
+        return self.errors.copy()
 
     def print_execution_summary(self) -> None:
         """Print a comprehensive summary of the graph execution."""
@@ -338,6 +441,12 @@ class GraphExecutionCallback(BaseCallbackHandler):
             self._print_rich_summary(summary)
         else:
             self._print_plain_summary(summary)
+
+        # Print errors if any
+        if self.errors and self.settings.enable_console_logging:
+            print(f"\n⚠️  {len(self.errors)} error(s) occurred during execution:")
+            for i, error in enumerate(self.errors[-5:], 1):  # Show last 5 errors
+                print(f"  {i}. [{error['type']}] {error['error']}")
 
     def create_manual_checkpoint(self, name: str, state: Optional[Dict[str, Any]] = None) -> None:
         """Manually create a checkpoint.
@@ -363,6 +472,12 @@ class GraphExecutionCallback(BaseCallbackHandler):
             return recovery_info.model_dump() if recovery_info else None
         except Exception as e:
             logger.error(f"Failed to get recovery info: {e}")
+            self.errors.append({
+                "type": "recovery_info_error",
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+                "timestamp": time.time()
+            })
             return None
 
     def _extract_node_name(self, serialized: Dict[str, Any], kwargs: Dict[str, Any]) -> str:
@@ -420,6 +535,13 @@ class GraphExecutionCallback(BaseCallbackHandler):
 
         except Exception as e:
             logger.error(f"Failed to create checkpoint {name}: {e}")
+            self.errors.append({
+                "type": "checkpoint_error",
+                "checkpoint_name": name,
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+                "timestamp": time.time()
+            })
 
     def _create_error_checkpoint(self, node_name: str, error: Exception) -> None:
         """Create a checkpoint when an error occurs."""
@@ -534,7 +656,27 @@ class GraphExecutionCallback(BaseCallbackHandler):
         summary_table.add_row("Max Concurrent", str(summary["max_concurrent_nodes"]))
         summary_table.add_row("Checkpoints Created", str(summary["checkpoint_count"]))
 
+        if summary.get("error_count", 0) > 0:
+            summary_table.add_row("Errors Encountered", f"[red]{summary['error_count']}[/red]")
+
         self.console.print(summary_table)
+
+        # Show recent errors if any
+        if self.errors:
+            error_table = Table(title="🚨 Recent Errors")
+            error_table.add_column("Type", style="red")
+            error_table.add_column("Error", style="yellow")
+            error_table.add_column("Time", style="cyan")
+
+            for error in self.errors[-3:]:  # Show last 3 errors
+                error_time = time.strftime("%H:%M:%S", time.localtime(error["timestamp"]))
+                error_table.add_row(
+                    error["type"],
+                    error["error"][:80] + "..." if len(error["error"]) > 80 else error["error"],
+                    error_time
+                )
+
+            self.console.print(error_table)
 
     def _print_plain_summary(self, summary: Dict[str, Any]) -> None:
         """Print plain text execution summary."""
@@ -547,6 +689,9 @@ class GraphExecutionCallback(BaseCallbackHandler):
         print(f"   Success rate: {summary['success_rate']:.1f}%")
         print(f"   Max concurrent: {summary['max_concurrent_nodes']}")
         print(f"   Checkpoints: {summary['checkpoint_count']}")
+
+        if summary.get("error_count", 0) > 0:
+            print(f"   Errors: {summary['error_count']}")
 
     def __enter__(self):
         """Context manager entry."""

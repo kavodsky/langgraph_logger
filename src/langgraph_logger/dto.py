@@ -74,6 +74,28 @@ class GraphExecutionResponse(BaseModel):
     extra_metadata: Optional[Dict[str, Any]] = None
     tags: Optional[List[str]] = None
 
+    @property
+    def success_rate(self) -> float:
+        """Calculate success rate as percentage."""
+        if self.total_nodes == 0:
+            return 0.0
+        return (self.completed_nodes / self.total_nodes) * 100.0
+
+    @property
+    def is_running(self) -> bool:
+        """Check if execution is currently running."""
+        return self.status == ExecutionStatus.RUNNING
+
+    @property
+    def is_completed(self) -> bool:
+        """Check if execution completed successfully."""
+        return self.status == ExecutionStatus.COMPLETED
+
+    @property
+    def is_failed(self) -> bool:
+        """Check if execution failed."""
+        return self.status == ExecutionStatus.FAILED
+
 
 class NodeExecutionCreate(BaseModel):
     """DTO for creating a node execution record."""
@@ -122,6 +144,21 @@ class NodeExecutionResponse(BaseModel):
     error_type: Optional[str] = None
     extra_metadata: Optional[Dict[str, Any]] = None
     parent_run_id: Optional[str] = None
+
+    @property
+    def is_running(self) -> bool:
+        """Check if node is currently running."""
+        return self.status == NodeStatus.RUNNING
+
+    @property
+    def is_completed(self) -> bool:
+        """Check if node completed successfully."""
+        return self.status == NodeStatus.COMPLETED
+
+    @property
+    def is_failed(self) -> bool:
+        """Check if node failed."""
+        return self.status == NodeStatus.FAILED
 
 
 class ExecutionStateCreate(BaseModel):

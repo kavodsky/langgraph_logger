@@ -11,6 +11,8 @@ from .callback import GraphExecutionCallback
 from .models import GraphExecution, NodeExecution, ExecutionState
 from .repository import GraphLoggerRepository
 from .settings import GraphLoggerSettings
+from .utils import logged_graph_execution
+
 
 __version__ = "0.1.0"
 __author__ = "Your Name"
@@ -23,4 +25,5 @@ __all__ = [
     "ExecutionState",
     "GraphLoggerRepository",
     "GraphLoggerSettings",
+    "logged_graph_execution"
 ]

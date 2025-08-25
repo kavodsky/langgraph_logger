@@ -1,13 +1,16 @@
 # src/langgraph_logger/cli.py
 
-"""Command-line interface for LangGraph Logger."""
+"""Command-line interface for LangGraph Logger with enhanced error handling."""
 
+import traceback
 from datetime import datetime, timedelta
 from typing import Optional
 
 import typer
 from rich.console import Console
 from rich.table import Table
+from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from .repository import GraphLoggerRepository
@@ -21,19 +24,36 @@ app = typer.Typer(
 console = Console()
 
 
+def handle_error(error: Exception, operation: str):
+    """Handle and display errors with full tracebacks."""
+    console.print(f"❌ [red]Error during {operation}:[/red]")
+    console.print(f"   {type(error).__name__}: {str(error)}")
+
+    # Show traceback in a collapsible panel
+    tb_text = traceback.format_exc()
+    console.print(Panel(
+        Syntax(tb_text, "python", theme="monokai", line_numbers=True),
+        title="Full Traceback",
+        expand=False,
+        border_style="red"
+    ))
+
+
 @app.command("init")
 def init_database(
         database_url: Optional[str] = typer.Option(None, "--db", help="Database URL"),
-        force: bool = typer.Option(False, "--force", help="Force recreation of tables")
+        force: bool = typer.Option(False, "--force", help="Force recreation of tables"),
+        show_traceback: bool = typer.Option(False, "--traceback", help="Show full tracebacks on errors")
 ):
     """Initialize the database tables."""
-    settings = GraphLoggerSettings.create_default()
-    if database_url:
-        settings.database_url = database_url
-
-    repository = GraphLoggerRepository(settings)
-
     try:
+        settings = GraphLoggerSettings.create_default()
+        if database_url:
+            settings.database_url = database_url
+
+        console.print(f"🔧 Initializing database: {settings.database_url}")
+        repository = GraphLoggerRepository(settings)
+
         if force:
             with console.status("Dropping existing tables..."):
                 repository.drop_tables()
@@ -43,11 +63,24 @@ def init_database(
             repository.create_tables()
             console.print("✅ [green]Database tables created successfully[/green]")
 
+        # Test basic functionality
+        with console.status("Testing database connection..."):
+            # Try a simple query to verify everything works
+            executions = repository.list_graph_executions(limit=1)
+            console.print("✅ [green]Database connection verified[/green]")
+
     except Exception as e:
-        console.print(f"❌ [red]Error initializing database: {e}[/red]")
+        if show_traceback:
+            handle_error(e, "database initialization")
+        else:
+            console.print(f"❌ [red]Error initializing database: {e}[/red]")
+            console.print("💡 [yellow]Use --traceback to see full error details[/yellow]")
         raise typer.Exit(1)
     finally:
-        repository.close()
+        try:
+            repository.close()
+        except:
+            pass
 
 
 @app.command("list")
@@ -55,13 +88,14 @@ def list_executions(
         graph_name: Optional[str] = typer.Option(None, "--graph", help="Filter by graph name"),
         status: Optional[str] = typer.Option(None, "--status", help="Filter by status"),
         limit: int = typer.Option(10, "--limit", help="Maximum number of results"),
-        days: Optional[int] = typer.Option(None, "--days", help="Show executions from last N days")
+        days: Optional[int] = typer.Option(None, "--days", help="Show executions from last N days"),
+        show_traceback: bool = typer.Option(False, "--traceback", help="Show full tracebacks on errors")
 ):
     """List graph executions."""
-    settings = GraphLoggerSettings.create_default()
-    repository = GraphLoggerRepository(settings)
-
     try:
+        settings = GraphLoggerSettings.create_default()
+        repository = GraphLoggerRepository(settings)
+
         # Parse status filter
         status_filter = None
         if status:
@@ -69,6 +103,7 @@ def list_executions(
                 status_filter = ExecutionStatus(status.lower())
             except ValueError:
                 console.print(f"❌ [red]Invalid status: {status}[/red]")
+                console.print(f"Valid statuses: {', '.join([s.value for s in ExecutionStatus])}")
                 raise typer.Exit(1)
 
         # Calculate date filter
@@ -76,15 +111,16 @@ def list_executions(
         if days:
             start_date = datetime.utcnow() - timedelta(days=days)
 
-        executions = repository.list_graph_executions(
-            graph_name=graph_name,
-            status=status_filter,
-            limit=limit,
-            start_date=start_date
-        )
+        with console.status("Fetching executions..."):
+            executions = repository.list_graph_executions(
+                graph_name=graph_name,
+                status=status_filter,
+                limit=limit,
+                start_date=start_date
+            )
 
         if not executions:
-            console.print("📭 [yellow]No executions found[/yellow]")
+            console.print("🔭 [yellow]No executions found[/yellow]")
             return
 
         # Create table
@@ -117,7 +153,7 @@ def list_executions(
             table.add_row(
                 execution.id[:8],
                 execution.graph_name,
-                f"[{status_style}]{execution.status}[/{status_style}]",
+                f"[{status_style}]{execution.status.value}[/{status_style}]",
                 execution.started_at.strftime("%Y-%m-%d %H:%M"),
                 duration,
                 nodes_info,
@@ -127,10 +163,17 @@ def list_executions(
         console.print(table)
 
     except Exception as e:
-        console.print(f"❌ [red]Error listing executions: {e}[/red]")
+        if show_traceback:
+            handle_error(e, "listing executions")
+        else:
+            console.print(f"❌ [red]Error listing executions: {e}[/red]")
+            console.print("💡 [yellow]Use --traceback to see full error details[/yellow]")
         raise typer.Exit(1)
     finally:
-        repository.close()
+        try:
+            repository.close()
+        except:
+            pass
 
 
 @app.command("show")
@@ -138,18 +181,21 @@ def show_execution(
         execution_id: str = typer.Argument(..., help="Execution ID to show"),
         nodes: bool = typer.Option(False, "--nodes", help="Show node details"),
         states: bool = typer.Option(False, "--states", help="Show saved states"),
-        metrics: bool = typer.Option(False, "--metrics", help="Show detailed metrics")
+        metrics: bool = typer.Option(False, "--metrics", help="Show detailed metrics"),
+        errors: bool = typer.Option(False, "--errors", help="Show error details"),
+        show_traceback: bool = typer.Option(False, "--traceback", help="Show full tracebacks on errors")
 ):
     """Show detailed information about a specific execution."""
-    settings = GraphLoggerSettings.create_default()
-    repository = GraphLoggerRepository(settings)
-
     try:
-        # Get execution
-        execution = repository.get_graph_execution(execution_id)
-        if not execution:
-            console.print(f"❌ [red]Execution not found: {execution_id}[/red]")
-            raise typer.Exit(1)
+        settings = GraphLoggerSettings.create_default()
+        repository = GraphLoggerRepository(settings)
+
+        with console.status("Fetching execution details..."):
+            # Get execution
+            execution = repository.get_graph_execution(execution_id)
+            if not execution:
+                console.print(f"❌ [red]Execution not found: {execution_id}[/red]")
+                raise typer.Exit(1)
 
         # Main execution info
         table = Table(title=f"Execution Details: {execution.id}")
@@ -158,7 +204,8 @@ def show_execution(
 
         table.add_row("ID", execution.id)
         table.add_row("Graph Name", execution.graph_name)
-        table.add_row("Status", execution.status)
+        table.add_row("Status",
+                      f"[{'green' if execution.is_completed else 'red' if execution.is_failed else 'yellow'}]{execution.status.value}[/]")
         table.add_row("Started", execution.started_at.strftime("%Y-%m-%d %H:%M:%S"))
 
         if execution.completed_at:
@@ -171,17 +218,37 @@ def show_execution(
         table.add_row("Completed Nodes", str(execution.completed_nodes))
         table.add_row("Failed Nodes", str(execution.failed_nodes))
         table.add_row("Success Rate", f"{execution.success_rate:.1f}%")
-        table.add_row("Max Parallel", str(execution.max_parallel_nodes))
 
         if execution.error_message:
-            table.add_row("Error", execution.error_message[:100] + "..." if len(
-                execution.error_message) > 100 else execution.error_message)
+            error_preview = execution.error_message[:100] + "..." if len(
+                execution.error_message) > 100 else execution.error_message
+            table.add_row("Error", f"[red]{error_preview}[/red]")
 
         console.print(table)
 
+        # Show full error details if requested
+        if errors and execution.error_message:
+            console.print("\n")
+            error_panel = Panel(
+                execution.error_message,
+                title="Error Message",
+                border_style="red"
+            )
+            console.print(error_panel)
+
+            if execution.error_traceback:
+                tb_panel = Panel(
+                    Syntax(execution.error_traceback, "python", theme="monokai", line_numbers=True),
+                    title="Error Traceback",
+                    border_style="red"
+                )
+                console.print(tb_panel)
+
         # Show nodes if requested
         if nodes:
-            node_executions = repository.get_node_executions_for_graph(execution_id)
+            with console.status("Fetching node details..."):
+                node_executions = repository.get_node_executions_for_graph(execution_id)
+
             if node_executions:
                 console.print("\n")
                 nodes_table = Table(title="Node Executions")
@@ -189,23 +256,29 @@ def show_execution(
                 nodes_table.add_column("Status", style="green")
                 nodes_table.add_column("Duration", style="yellow")
                 nodes_table.add_column("Started", style="magenta")
+                nodes_table.add_column("Error", style="red")
 
                 for node in node_executions:
                     duration = f"{node.duration_seconds:.3f}s" if node.duration_seconds else "N/A"
                     status_style = "green" if node.is_completed else "red" if node.is_failed else "yellow"
+                    error_info = node.error_message[:30] + "..." if node.error_message and len(
+                        node.error_message) > 30 else (node.error_message or "")
 
                     nodes_table.add_row(
                         node.node_name,
-                        f"[{status_style}]{node.status}[/{status_style}]",
+                        f"[{status_style}]{node.status.value}[/{status_style}]",
                         duration,
-                        node.started_at.strftime("%H:%M:%S")
+                        node.started_at.strftime("%H:%M:%S"),
+                        f"[red]{error_info}[/red]" if error_info else ""
                     )
 
                 console.print(nodes_table)
 
         # Show states if requested
         if states:
-            recovery_states = repository.get_recovery_states(execution_id)
+            with console.status("Fetching saved states..."):
+                recovery_states = repository.get_recovery_states(execution_id)
+
             if recovery_states:
                 console.print("\n")
                 states_table = Table(title="Saved States")
@@ -225,7 +298,9 @@ def show_execution(
 
         # Show metrics if requested
         if metrics:
-            execution_metrics = repository.get_execution_metrics(execution_id)
+            with console.status("Calculating metrics..."):
+                execution_metrics = repository.get_execution_metrics(execution_id)
+
             if execution_metrics:
                 console.print("\n")
                 metrics_table = Table(title="Detailed Metrics")
@@ -247,22 +322,32 @@ def show_execution(
                 console.print(metrics_table)
 
     except Exception as e:
-        console.print(f"❌ [red]Error showing execution: {e}[/red]")
+        if show_traceback:
+            handle_error(e, "showing execution details")
+        else:
+            console.print(f"❌ [red]Error showing execution: {e}[/red]")
+            console.print("💡 [yellow]Use --traceback to see full error details[/yellow]")
         raise typer.Exit(1)
     finally:
-        repository.close()
+        try:
+            repository.close()
+        except:
+            pass
 
 
 @app.command("recovery")
 def show_recovery_info(
-        execution_id: str = typer.Argument(..., help="Execution ID to show recovery info for")
+        execution_id: str = typer.Argument(..., help="Execution ID to show recovery info for"),
+        show_traceback: bool = typer.Option(False, "--traceback", help="Show full tracebacks on errors")
 ):
     """Show recovery information for a failed execution."""
-    settings = GraphLoggerSettings.create_default()
-    repository = GraphLoggerRepository(settings)
-
     try:
-        recovery_info = repository.get_recovery_info(execution_id)
+        settings = GraphLoggerSettings.create_default()
+        repository = GraphLoggerRepository(settings)
+
+        with console.status("Fetching recovery information..."):
+            recovery_info = repository.get_recovery_info(execution_id)
+
         if not recovery_info:
             console.print(f"❌ [red]No recovery info found for execution: {execution_id}[/red]")
             raise typer.Exit(1)
@@ -294,23 +379,119 @@ def show_recovery_info(
             console.print(checkpoints_table)
 
     except Exception as e:
-        console.print(f"❌ [red]Error showing recovery info: {e}[/red]")
+        if show_traceback:
+            handle_error(e, "showing recovery info")
+        else:
+            console.print(f"❌ [red]Error showing recovery info: {e}[/red]")
+            console.print("💡 [yellow]Use --traceback to see full error details[/yellow]")
         raise typer.Exit(1)
     finally:
-        repository.close()
+        try:
+            repository.close()
+        except:
+            pass
+
+
+@app.command("debug")
+def debug_execution(
+        execution_id: str = typer.Argument(..., help="Execution ID to debug"),
+):
+    """Debug an execution with full error details and traces."""
+    try:
+        settings = GraphLoggerSettings.create_default()
+        repository = GraphLoggerRepository(settings)
+
+        console.print(f"🔍 [bold blue]Debugging execution: {execution_id}[/bold blue]\n")
+
+        # Get execution
+        execution = repository.get_graph_execution(execution_id)
+        if not execution:
+            console.print(f"❌ [red]Execution not found: {execution_id}[/red]")
+            raise typer.Exit(1)
+
+        # Show basic info
+        console.print(f"📊 Graph: {execution.graph_name}")
+        console.print(f"📊 Status: {execution.status.value}")
+        console.print(f"📊 Started: {execution.started_at}")
+        console.print(f"📊 Nodes: {execution.completed_nodes}/{execution.total_nodes} completed")
+
+        if execution.failed_nodes > 0:
+            console.print(f"❌ Failed nodes: {execution.failed_nodes}")
+
+        # Show error details
+        if execution.error_message:
+            console.print("\n🚨 [bold red]Main Error:[/bold red]")
+            error_panel = Panel(
+                execution.error_message,
+                title="Error Message",
+                border_style="red"
+            )
+            console.print(error_panel)
+
+        if execution.error_traceback:
+            console.print("\n📋 [bold red]Error Traceback:[/bold red]")
+            tb_panel = Panel(
+                Syntax(execution.error_traceback, "python", theme="monokai", line_numbers=True),
+                title="Full Traceback",
+                border_style="red",
+                expand=False
+            )
+            console.print(tb_panel)
+
+        # Show failed nodes
+        nodes = repository.get_node_executions_for_graph(execution_id)
+        failed_nodes = [n for n in nodes if n.is_failed]
+
+        if failed_nodes:
+            console.print(f"\n❌ [bold red]Failed Nodes ({len(failed_nodes)}):[/bold red]")
+
+            for node in failed_nodes:
+                console.print(f"\n🔸 [bold yellow]{node.node_name}[/bold yellow] (Run ID: {node.run_id[:8]})")
+                console.print(
+                    f"   Duration: {node.duration_seconds:.3f}s" if node.duration_seconds else "   Duration: N/A")
+
+                if node.error_message:
+                    error_panel = Panel(
+                        f"[red]{node.error_type}[/red]: {node.error_message}",
+                        title=f"Node Error: {node.node_name}",
+                        border_style="red"
+                    )
+                    console.print(error_panel)
+
+        # Show recovery options
+        recovery_info = repository.get_recovery_info(execution_id)
+        if recovery_info and recovery_info.can_recover:
+            console.print(f"\n🔄 [bold green]Recovery Available![/bold green]")
+            console.print(f"   Last checkpoint: {recovery_info.last_successful_checkpoint}")
+            console.print(f"   Available checkpoints: {len(recovery_info.available_checkpoints)}")
+
+        # Show database connection info
+        console.print(f"\n🗄️  [bold blue]Database Info:[/bold blue]")
+        console.print(f"   URL: {settings.database_url}")
+        console.print(f"   Tables initialized: ✅")
+
+    except Exception as e:
+        handle_error(e, "debugging execution")
+        raise typer.Exit(1)
+    finally:
+        try:
+            repository.close()
+        except:
+            pass
 
 
 @app.command("cleanup")
 def cleanup_old_executions(
         days: int = typer.Option(30, "--days", help="Keep executions from last N days"),
         dry_run: bool = typer.Option(False, "--dry-run", help="Show what would be deleted without deleting"),
-        confirm: bool = typer.Option(False, "--confirm", help="Skip confirmation prompt")
+        confirm: bool = typer.Option(False, "--confirm", help="Skip confirmation prompt"),
+        show_traceback: bool = typer.Option(False, "--traceback", help="Show full tracebacks on errors")
 ):
     """Clean up old execution records."""
-    settings = GraphLoggerSettings.create_default()
-    repository = GraphLoggerRepository(settings)
-
     try:
+        settings = GraphLoggerSettings.create_default()
+        repository = GraphLoggerRepository(settings)
+
         if not dry_run and not confirm:
             proceed = typer.confirm(f"This will delete execution records older than {days} days. Continue?")
             if not proceed:
@@ -336,35 +517,44 @@ def cleanup_old_executions(
             console.print(f"✅ [green]Cleaned up {deleted_count} old execution records[/green]")
 
     except Exception as e:
-        console.print(f"❌ [red]Error during cleanup: {e}[/red]")
+        if show_traceback:
+            handle_error(e, "cleanup operation")
+        else:
+            console.print(f"❌ [red]Error during cleanup: {e}[/red]")
+            console.print("💡 [yellow]Use --traceback to see full error details[/yellow]")
         raise typer.Exit(1)
     finally:
-        repository.close()
+        try:
+            repository.close()
+        except:
+            pass
 
 
 @app.command("stats")
 def show_statistics(
         days: Optional[int] = typer.Option(7, "--days", help="Show stats for last N days"),
-        graph_name: Optional[str] = typer.Option(None, "--graph", help="Filter by graph name")
+        graph_name: Optional[str] = typer.Option(None, "--graph", help="Filter by graph name"),
+        show_traceback: bool = typer.Option(False, "--traceback", help="Show full tracebacks on errors")
 ):
     """Show execution statistics."""
-    settings = GraphLoggerSettings.create_default()
-    repository = GraphLoggerRepository(settings)
-
     try:
+        settings = GraphLoggerSettings.create_default()
+        repository = GraphLoggerRepository(settings)
+
         # Calculate date filter
         start_date = None
         if days:
             start_date = datetime.utcnow() - timedelta(days=days)
 
-        executions = repository.list_graph_executions(
-            graph_name=graph_name,
-            start_date=start_date,
-            limit=1000  # Get more for stats
-        )
+        with console.status("Calculating statistics..."):
+            executions = repository.list_graph_executions(
+                graph_name=graph_name,
+                start_date=start_date,
+                limit=1000  # Get more for stats
+            )
 
         if not executions:
-            console.print("📭 [yellow]No executions found[/yellow]")
+            console.print("🔭 [yellow]No executions found[/yellow]")
             return
 
         # Calculate statistics
@@ -419,28 +609,6 @@ def show_statistics(
                 graph_table.add_column("Total", style="white")
                 graph_table.add_column("Completed", style="green")
                 graph_table.add_column("Failed", style="red")
-                graph_table.add_column("Running", style="yellow")
-                graph_table.add_column("Success Rate", style="cyan")
-
-                for graph_name, stats in sorted(graph_stats.items()):
-                    success_rate = (stats['completed'] / max(1, stats['total'])) * 100
-                    graph_table.add_row(
-                        graph_name,
-                        str(stats['total']),
-                        str(stats['completed']),
-                        str(stats['failed']),
-                        str(stats['running']),
-                        f"{success_rate:.1f}%"
-                    )
-
-                console.print(graph_table)
-
-    except Exception as e:
-        console.print(f"❌ [red]Error showing statistics: {e}[/red]")
-        raise typer.Exit(1)
+                # graph_table.add_column("Running", style="
     finally:
         repository.close()
-
-
-if __name__ == "__main__":
-    app()

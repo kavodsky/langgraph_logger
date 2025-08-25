@@ -15,7 +15,8 @@ from sqlalchemy.engine import Engine
 from .dto import (
     ExecutionStatus, NodeStatus, GraphExecutionCreate, GraphExecutionUpdate,
     NodeExecutionCreate, NodeExecutionUpdate, ExecutionStateCreate,
-    ExecutionMetrics, RecoveryInfo
+    ExecutionMetrics, RecoveryInfo, GraphExecutionResponse, NodeExecutionResponse,
+    ExecutionStateResponse
 )
 from .models import Base, GraphExecution, NodeExecution, ExecutionState
 from .settings import GraphLoggerSettings
@@ -88,6 +89,58 @@ class GraphLoggerRepository:
             logger.error(f"Error dropping database tables: {e}")
             raise
 
+    # Helper methods to convert models to DTOs
+
+    def _to_graph_execution_response(self, execution: GraphExecution) -> GraphExecutionResponse:
+        """Convert GraphExecution model to response DTO."""
+        return GraphExecutionResponse(
+            id=execution.id,
+            graph_name=execution.graph_name,
+            status=ExecutionStatus(execution.status),
+            started_at=execution.started_at,
+            completed_at=execution.completed_at,
+            duration_seconds=execution.duration_seconds,
+            initial_state=execution.initial_state,
+            final_state=execution.final_state,
+            error_message=execution.error_message,
+            error_traceback=execution.error_traceback,
+            total_nodes=execution.total_nodes,
+            completed_nodes=execution.completed_nodes,
+            failed_nodes=execution.failed_nodes,
+            extra_metadata=execution.extra_metadata,
+            tags=execution.tags
+        )
+
+    def _to_node_execution_response(self, node: NodeExecution) -> NodeExecutionResponse:
+        """Convert NodeExecution model to response DTO."""
+        return NodeExecutionResponse(
+            id=node.id,
+            execution_id=node.execution_id,
+            node_name=node.node_name,
+            run_id=node.run_id,
+            status=NodeStatus(node.status),
+            started_at=node.started_at,
+            completed_at=node.completed_at,
+            duration_seconds=node.duration_seconds,
+            input_data=node.input_data,
+            output_data=node.output_data,
+            error_message=node.error_message,
+            error_type=node.error_type,
+            extra_metadata=node.extra_metadata,
+            parent_run_id=node.parent_run_id
+        )
+
+    def _to_execution_state_response(self, state: ExecutionState) -> ExecutionStateResponse:
+        """Convert ExecutionState model to response DTO."""
+        return ExecutionStateResponse(
+            id=state.id,
+            execution_id=state.execution_id,
+            checkpoint_name=state.checkpoint_name,
+            state_data=state.state_data,
+            created_at=state.created_at,
+            extra_metadata=state.extra_metadata
+        )
+
     # Graph Execution Methods
 
     def create_graph_execution(self, data: GraphExecutionCreate) -> str:
@@ -111,8 +164,9 @@ class GraphLoggerRepository:
             session.add(execution)
             session.flush()  # Get the ID without committing
 
-            logger.debug(f"Created graph execution: {execution.id}")
-            return execution.id
+            execution_id = execution.id
+            logger.debug(f"Created graph execution: {execution_id}")
+            return execution_id
 
     def update_graph_execution(self, execution_id: str, data: GraphExecutionUpdate) -> bool:
         """Update an existing graph execution record.
@@ -156,19 +210,25 @@ class GraphLoggerRepository:
             logger.debug(f"Updated graph execution: {execution_id}")
             return True
 
-    def get_graph_execution(self, execution_id: str) -> Optional[GraphExecution]:
+    def get_graph_execution(self, execution_id: str) -> Optional[GraphExecutionResponse]:
         """Get a graph execution by ID.
 
         Args:
             execution_id: ID of the execution to retrieve
 
         Returns:
-            GraphExecution object or None if not found
+            GraphExecutionResponse DTO or None if not found
         """
         with self.get_session() as session:
-            return session.query(GraphExecution).filter(
+            execution = session.query(GraphExecution).filter(
                 GraphExecution.id == execution_id
             ).first()
+
+            if execution is None:
+                return None
+
+            # Convert to DTO within the session context
+            return self._to_graph_execution_response(execution)
 
     def list_graph_executions(
             self,
@@ -178,7 +238,7 @@ class GraphLoggerRepository:
             offset: int = 0,
             start_date: Optional[datetime] = None,
             end_date: Optional[datetime] = None
-    ) -> List[GraphExecution]:
+    ) -> List[GraphExecutionResponse]:
         """List graph executions with optional filtering.
 
         Args:
@@ -190,7 +250,7 @@ class GraphLoggerRepository:
             end_date: Filter executions started before this date
 
         Returns:
-            List of GraphExecution objects
+            List of GraphExecutionResponse DTOs
         """
         with self.get_session() as session:
             query = session.query(GraphExecution)
@@ -211,7 +271,10 @@ class GraphLoggerRepository:
             # Order by most recent first
             query = query.order_by(desc(GraphExecution.started_at))
 
-            return query.offset(offset).limit(limit).all()
+            executions = query.offset(offset).limit(limit).all()
+
+            # Convert to DTOs within the session context
+            return [self._to_graph_execution_response(execution) for execution in executions]
 
     # Node Execution Methods
 
@@ -238,8 +301,9 @@ class GraphLoggerRepository:
             session.add(node_execution)
             session.flush()
 
-            logger.debug(f"Created node execution: {node_execution.id}")
-            return node_execution.id
+            node_id = node_execution.id
+            logger.debug(f"Created node execution: {node_id}")
+            return node_id
 
     def update_node_execution(self, run_id: str, data: NodeExecutionUpdate) -> bool:
         """Update an existing node execution record by run_id.
@@ -285,36 +349,42 @@ class GraphLoggerRepository:
             logger.debug(f"Updated node execution: {run_id}")
             return True
 
-    def get_node_executions_for_graph(self, execution_id: str) -> List[NodeExecution]:
+    def get_node_executions_for_graph(self, execution_id: str) -> List[NodeExecutionResponse]:
         """Get all node executions for a graph execution.
 
         Args:
             execution_id: ID of the graph execution
 
         Returns:
-            List of NodeExecution objects
+            List of NodeExecutionResponse DTOs
         """
         with self.get_session() as session:
-            return session.query(NodeExecution).filter(
+            nodes = session.query(NodeExecution).filter(
                 NodeExecution.execution_id == execution_id
             ).order_by(NodeExecution.started_at).all()
 
-    def get_active_node_executions(self, execution_id: str) -> List[NodeExecution]:
+            # Convert to DTOs within the session context
+            return [self._to_node_execution_response(node) for node in nodes]
+
+    def get_active_node_executions(self, execution_id: str) -> List[NodeExecutionResponse]:
         """Get currently running node executions for a graph.
 
         Args:
             execution_id: ID of the graph execution
 
         Returns:
-            List of currently running NodeExecution objects
+            List of currently running NodeExecutionResponse DTOs
         """
         with self.get_session() as session:
-            return session.query(NodeExecution).filter(
+            nodes = session.query(NodeExecution).filter(
                 and_(
                     NodeExecution.execution_id == execution_id,
                     NodeExecution.status == NodeStatus.RUNNING.value
                 )
             ).all()
+
+            # Convert to DTOs within the session context
+            return [self._to_node_execution_response(node) for node in nodes]
 
     # Execution State Methods
 
@@ -344,39 +414,49 @@ class GraphLoggerRepository:
             session.add(state)
             session.flush()
 
-            logger.debug(f"Created execution state: {state.id}")
-            return state.id
+            state_id = state.id
+            logger.debug(f"Created execution state: {state_id}")
+            return state_id
 
-    def get_latest_execution_state(self, execution_id: str) -> Optional[ExecutionState]:
+    def get_latest_execution_state(self, execution_id: str) -> Optional[ExecutionStateResponse]:
         """Get the latest execution state for a graph execution.
 
         Args:
             execution_id: ID of the graph execution
 
         Returns:
-            Latest ExecutionState object or None if not found
+            Latest ExecutionStateResponse DTO or None if not found
         """
         with self.get_session() as session:
-            return session.query(ExecutionState).filter(
+            state = session.query(ExecutionState).filter(
                 ExecutionState.execution_id == execution_id
             ).order_by(desc(ExecutionState.sequence_number)).first()
 
-    def get_recovery_states(self, execution_id: str) -> List[ExecutionState]:
+            if state is None:
+                return None
+
+            # Convert to DTO within the session context
+            return self._to_execution_state_response(state)
+
+    def get_recovery_states(self, execution_id: str) -> List[ExecutionStateResponse]:
         """Get all recovery states for a graph execution.
 
         Args:
             execution_id: ID of the graph execution
 
         Returns:
-            List of recovery ExecutionState objects
+            List of recovery ExecutionStateResponse DTOs
         """
         with self.get_session() as session:
-            return session.query(ExecutionState).filter(
+            states = session.query(ExecutionState).filter(
                 and_(
                     ExecutionState.execution_id == execution_id,
                     ExecutionState.is_recovery_point == True
                 )
             ).order_by(ExecutionState.sequence_number).all()
+
+            # Convert to DTOs within the session context
+            return [self._to_execution_state_response(state) for state in states]
 
     # Statistics and Analytics Methods
 
@@ -404,8 +484,8 @@ class GraphLoggerRepository:
 
             total_duration = execution.duration_seconds or 0.0
             total_nodes = len(nodes)
-            completed_nodes = sum(1 for n in nodes if n.is_completed)
-            failed_nodes = sum(1 for n in nodes if n.is_failed)
+            completed_nodes = sum(1 for n in nodes if n.status == NodeStatus.COMPLETED.value)
+            failed_nodes = sum(1 for n in nodes if n.status == NodeStatus.FAILED.value)
 
             # Calculate node timings
             node_timings = {}
@@ -446,7 +526,7 @@ class GraphLoggerRepository:
             # Error summary
             error_summary = []
             for node in nodes:
-                if node.is_failed and node.error_message:
+                if node.status == NodeStatus.FAILED.value and node.error_message:
                     error_summary.append({
                         'node_name': node.node_name,
                         'error_type': node.error_type,
@@ -490,8 +570,16 @@ class GraphLoggerRepository:
                 return None
 
             # Get recovery states
-            recovery_states = self.get_recovery_states(execution_id)
-            latest_state = self.get_latest_execution_state(execution_id)
+            recovery_states = session.query(ExecutionState).filter(
+                and_(
+                    ExecutionState.execution_id == execution_id,
+                    ExecutionState.is_recovery_point == True
+                )
+            ).order_by(ExecutionState.sequence_number).all()
+
+            latest_state = session.query(ExecutionState).filter(
+                ExecutionState.execution_id == execution_id
+            ).order_by(desc(ExecutionState.sequence_number)).first()
 
             # Get failed nodes
             failed_nodes = session.query(NodeExecution).filter(
@@ -504,7 +592,7 @@ class GraphLoggerRepository:
             failed_node_names = [node.node_name for node in failed_nodes]
 
             # Determine if recovery is possible
-            can_recover = len(recovery_states) > 0 and execution.is_failed
+            can_recover = len(recovery_states) > 0 and execution.status == ExecutionStatus.FAILED.value
 
             # Find last successful checkpoint
             last_checkpoint = None
@@ -590,8 +678,8 @@ class GraphLoggerRepository:
             ).all()
 
             execution.total_nodes = len(nodes)
-            execution.completed_nodes = sum(1 for n in nodes if n.is_completed)
-            execution.failed_nodes = sum(1 for n in nodes if n.is_failed)
+            execution.completed_nodes = sum(1 for n in nodes if n.status == NodeStatus.COMPLETED.value)
+            execution.failed_nodes = sum(1 for n in nodes if n.status == NodeStatus.FAILED.value)
 
             # Calculate max parallel nodes (approximate)
             # This is a simplified calculation - in practice you might want to track this more precisely
