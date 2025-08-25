@@ -1,0 +1,111 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  fastapi-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: langgraph_logger_demo
+    ports:
+      - "8000:8000"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8000
+      - DEBUG=true
+      - DATABASE_URL=sqlite:///app/data/langgraph_logger.db
+      - ENABLE_CONSOLE_LOGGING=true
+      - ENABLE_RICH_OUTPUT=true
+      - AUTO_SAVE_STATE=true
+      - RECOVERY_CHECKPOINT_INTERVAL=5
+    volumes:
+      - ./data:/app/data  # Persist SQLite database
+      - ./logs:/app/logs  # Persist logs (optional)
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: PostgreSQL database for production
+  postgres:
+    image: postgres:15-alpine
+    container_name: langgraph_postgres
+    environment:
+      POSTGRES_DB: langgraph_logger
+      POSTGRES_USER: langgraph_user
+      POSTGRES_PASSWORD: langgraph_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    profiles:
+      - postgres  # Only start with: docker-compose --profile postgres up
+
+volumes:
+  postgres_data:
+
+---
+# .env.example
+# Copy this file to .env and modify as needed
+
+# Server Configuration
+HOST=0.0.0.0
+PORT=8000
+DEBUG=false
+
+# Database Configuration
+# SQLite (default)
+DATABASE_URL=sqlite:///./langgraph_logger.db
+
+# PostgreSQL (alternative)
+# DATABASE_URL=postgresql://langgraph_user:langgraph_password@localhost:5432/langgraph_logger
+
+# Logging Configuration
+ENABLE_CONSOLE_LOGGING=true
+ENABLE_RICH_OUTPUT=true
+AUTO_SAVE_STATE=true
+RECOVERY_CHECKPOINT_INTERVAL=5
+
+# Optional: API Keys for extended functionality
+# OPENAI_API_KEY=your_openai_api_key_here
+# ANTHROPIC_API_KEY=your_anthropic_api_key_here
+
+---
+# Dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY . .
+
+# Create directories for data persistence
+RUN mkdir -p /app/data /app/logs
+
+# Create non-root user for security
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Start the application
+CMD ["python", "main.py"]

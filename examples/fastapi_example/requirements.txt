@@ -1,30 +1,29 @@
-# requirements.txt for FastAPI LangGraph Logger Example
-
-# Core dependencies
+# requirements.txt
+# FastAPI and server dependencies
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 pydantic==2.5.0
 pydantic-settings==2.1.0
 
-# Database
+# Database dependencies
 sqlalchemy==2.0.23
-sqlite3  # Built into Python
+sqlite3  # Built into Python, but listed for clarity
 
-# LangChain and LangGraph
-langchain==0.1.0
-langchain-openai==0.0.2
-langgraph==0.0.20
+# LangGraph and LangChain dependencies
+langgraph==0.0.40
+langchain-core==0.1.12
+langchain-community==0.0.10
 
-# Rich for console output
+# Console output
 rich==13.7.0
 
-# Optional: PostgreSQL support
-# psycopg2-binary==2.9.9
-
-# Optional: MySQL support
-# pymysql==1.1.0
+# Background task processing
+python-multipart==0.0.6
 
 # Development dependencies (optional)
-# pytest==7.4.3
-# httpx==0.25.2  # for testing FastAPI
-# pytest-asyncio==0.21.1
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.2  # For testing FastAPI endpoints
+
+# Production deployment (optional)
+gunicorn==21.2.0
